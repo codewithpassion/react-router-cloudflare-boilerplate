@@ -10,6 +10,7 @@
 .mf
 .wrangler
 .dev.vars*
+!.dev.vars.example
 
 # Added by Task Master AI
 # Logs

@@ -10,7 +10,10 @@
 	"main": "./workers/app.ts",
 	"assets": {},
 	"vars": {
-		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
+		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare",
+		"FROM_EMAIL": "noreply@example.com",
+		"FROM_NAME": "React Router Boilerplate",
+		"SUPPORT_EMAIL": "support@example.com"
 	},
 	"observability": {
 		"enabled": true

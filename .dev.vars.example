@@ -1,0 +1,5 @@
+# Authentication
+BETTER_AUTH_SECRET=your_secret_key_here
+
+# Email Service (Resend)
+RESEND_API_KEY=re_your_api_key_here

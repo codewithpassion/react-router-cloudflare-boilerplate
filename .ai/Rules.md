@@ -35,3 +35,10 @@
 - Use `hono` for backend functionality
 - Database: Drizzle ORM with schemas in `api/database/schema.ts` (SQLite tables)
 - Data storage: Cloudflare D1 and KV with Drizzle ORM
+
+## Environment Variables & Types
+- **Never directly edit** `worker-configuration.d.ts` (auto-generated file)
+- Add environment variables to `wrangler.jsonc` (`vars` section)
+- Add secrets to `.dev.vars` for local development and `.dev.vars.example` for documentation
+- Run `bun cf-typegen` to regenerate TypeScript types after changes
+- Use `wrangler secret put VARIABLE_NAME` for production secrets
