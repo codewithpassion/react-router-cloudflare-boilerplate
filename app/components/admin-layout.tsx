@@ -1,8 +1,15 @@
 import {
+	BarChart3,
+	Camera,
+	Flag,
 	LucideHome,
 	LucideLayoutDashboard,
 	LucideMenu,
 	LucideSettings,
+	Shield,
+	Tag,
+	Trophy,
+	Users,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import {
@@ -19,9 +26,18 @@ import {
 
 interface LayoutProps {
 	children: ReactNode;
+	user?: {
+		id: string;
+		email: string;
+		name: string;
+		role: "user" | "admin";
+		emailVerified: boolean;
+		createdAt: string;
+		image?: string;
+	} | null;
 }
 
-export function AdminSiteLayout({ children }: LayoutProps) {
+export function AdminLayout({ children, user }: LayoutProps) {
 	return (
 		<SidebarProvider defaultOpen>
 			<div className="flex min-h-screen">

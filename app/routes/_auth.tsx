@@ -6,6 +6,7 @@ import {
 	Outlet,
 	redirect,
 } from "react-router";
+import { MainLayout } from "~/components/main-layout";
 import { authFactory } from "~~/auth";
 
 export async function loader(args: LoaderFunctionArgs) {
@@ -24,8 +25,8 @@ export async function loader(args: LoaderFunctionArgs) {
 
 export default function Protected() {
 	return (
-		<>
+		<MainLayout>
 			<Outlet />
-		</>
+		</MainLayout>
 	);
 }
