@@ -12,6 +12,7 @@ import {
 
 import type { Route } from "./+types/root";
 import "./tailwind.css";
+import { Providers } from "~/components/providers";
 import { authFactory } from "~~/auth";
 
 export const links: Route.LinksFunction = () => [
@@ -58,7 +59,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-	return <Outlet />;
+	return (
+		<Providers>
+			<Outlet />
+		</Providers>
+	);
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {

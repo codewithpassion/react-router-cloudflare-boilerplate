@@ -1,2 +1,2 @@
-bunx biome check --staged --fix
+bunx biome check --staged --fix --no-errors-on-unmatched
 git update-index --again
