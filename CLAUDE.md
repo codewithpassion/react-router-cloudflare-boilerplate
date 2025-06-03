@@ -5,7 +5,7 @@ This is a modern React application deployed to Cloudflare with authentication, s
 ## Key References
 - @README.md - Project overview and basic setup
 - @package.json - Available commands and dependencies
-- .ai/Rules.md - Detailed code style guidelines and commands
+- ai_docs/Rules.md - Detailed code style guidelines and commands
 
 ## Quick Commands
 - Development: `bun dev`

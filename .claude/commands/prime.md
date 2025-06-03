@@ -11,4 +11,4 @@ git ls-files
 - README.md
 - CLAUDE.md
 - package.json
-- .ai/Rules.md
+- ai_docs/Rules.md
