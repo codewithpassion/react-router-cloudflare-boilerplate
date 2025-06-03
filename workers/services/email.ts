@@ -16,6 +16,7 @@ export class ResendEmailService implements EmailService {
 	private fromName: string;
 	private brandLogoUrl?: string;
 	private supportEmail: string;
+	private devMode: boolean;
 
 	constructor(env: AppType["Bindings"]) {
 		if (!env.RESEND_API_KEY) {
@@ -27,6 +28,7 @@ export class ResendEmailService implements EmailService {
 		this.fromName = env.FROM_NAME || "Your App";
 		this.brandLogoUrl = env.BRAND_LOGO_URL;
 		this.supportEmail = env.SUPPORT_EMAIL || "support@example.com";
+		this.devMode = env.DEV_MODE === "true";
 	}
 
 	async sendMagicLink(params: {
@@ -54,6 +56,10 @@ export class ResendEmailService implements EmailService {
 			if (error) {
 				console.error("Resend email error:", error);
 				return { success: false, error: error.message };
+			}
+
+			if (this.devMode) {
+				console.log(`🔗 [DEV] Magic Link URL: ${params.magicLink}`);
 			}
 
 			return { success: true, messageId: data?.id };
