@@ -54,92 +54,117 @@ interface PhotoWithVotes {
 }
 ```
 
-## API Endpoints
+## tRPC Procedures
 
-### Cast Vote
+### Voting Router
+
+#### File: `api/trpc/routers/voting.ts`
+
 ```typescript
-POST /api/photos/:photoId/vote
-Authorization: Bearer <token>
+import { z } from 'zod';
+import { createTRPCRouter, publicProcedure, protectedProcedure } from '../trpc';
+import { VotingService } from '../../services/voting.service';
+import { 
+  idSchema, 
+  paginationSchema 
+} from '../schemas/common';
+import { 
+  AlreadyVotedError, 
+  CannotVoteOwnPhotoError, 
+  PhotoNotFoundError 
+} from '../errors';
 
-Response:
-{
-  "success": true,
-  "voteCount": 15,
-  "userHasVoted": true
-}
+const getPhotosInputSchema = paginationSchema.extend({
+  competitionId: idSchema,
+  categoryId: idSchema.optional(),
+  sortBy: z.enum(['votes', 'date', 'title']).default('votes'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+});
 
-Error Responses:
-400 - Already voted
-403 - Cannot vote on own photo
-404 - Photo not found
-401 - Authentication required
-```
+const getUserVoteHistorySchema = z.object({
+  competitionId: idSchema.optional(),
+});
 
-### Get Vote Status
-```typescript
-GET /api/photos/:photoId/votes
-Authorization: Bearer <token> (optional)
+const getTopPhotosSchema = z.object({
+  competitionId: idSchema,
+  categoryId: idSchema.optional(),
+  limit: z.number().min(1).max(50).default(10),
+});
 
-Response:
-{
-  "voteCount": 15,
-  "userHasVoted": true, // Only if authenticated
-  "canVote": false // Based on auth and ownership
-}
-```
+const votingService = new VotingService();
 
-### Get Photos with Votes
-```typescript
-GET /api/competitions/:competitionId/photos?categoryId=cat_1&sortBy=votes&order=desc&limit=20&offset=0
-Authorization: Bearer <token> (optional)
+export const votingRouter = createTRPCRouter({
+  // Cast a vote (requires authentication)
+  castVote: protectedProcedure
+    .input(z.object({ photoId: idSchema }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await votingService.castVote(ctx.user.id, input.photoId);
+      
+      if (!result.success) {
+        if (result.error?.includes('already voted')) {
+          throw new AlreadyVotedError();
+        }
+        if (result.error?.includes('own photo')) {
+          throw new CannotVoteOwnPhotoError();
+        }
+        if (result.error?.includes('not found')) {
+          throw new PhotoNotFoundError();
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: result.error || 'Failed to cast vote',
+        });
+      }
 
-Response:
-{
-  "photos": [
-    {
-      "id": "photo_123",
-      "title": "Mountain Wildlife",
-      "description": "Beautiful capture...",
-      "filePath": "/uploads/comp_123/photo_123.jpg",
-      "voteCount": 25,
-      "userHasVoted": false,
-      "canVote": true,
-      "categoryId": "cat_1",
-      "categoryName": "Landscape",
-      "photographer": {
-        "id": "user_456",
-        "email": "photographer@example.com"
-      },
-      "dateTaken": "2024-01-10T15:30:00Z",
-      "location": "Rocky Mountains",
-      "cameraInfo": "Canon EOS R5",
-      "settings": "ISO 800, f/5.6, 1/500s"
-    }
-  ],
-  "total": 50,
-  "limit": 20,
-  "offset": 0
-}
-```
+      return {
+        success: true,
+        voteCount: result.voteCount,
+        userHasVoted: true,
+      };
+    }),
 
-### Get User Vote History
-```typescript
-GET /api/votes/mine?competitionId=comp_123
-Authorization: Bearer <token>
+  // Get vote status for a photo (public with optional auth)
+  getVoteStatus: publicProcedure
+    .input(z.object({ photoId: idSchema }))
+    .query(async ({ ctx, input }) => {
+      return await votingService.getUserVoteStatus(ctx.user?.id || null, input.photoId);
+    }),
 
-Response:
-{
-  "votes": [
-    {
-      "id": "vote_123",
-      "photoId": "photo_456",
-      "photoTitle": "Sunset Wildlife",
-      "categoryName": "Landscape",
-      "votedAt": "2024-01-15T10:30:00Z"
-    }
-  ],
-  "totalVotes": 1
-}
+  // Get photos with votes (public with optional auth for user status)
+  getPhotosWithVotes: publicProcedure
+    .input(getPhotosInputSchema)
+    .query(async ({ ctx, input }) => {
+      const { competitionId, categoryId, sortBy, order, limit, offset } = input;
+      
+      return await votingService.getPhotosWithVotes(
+        competitionId,
+        { categoryId, sortBy, order, limit, offset },
+        ctx.user?.id
+      );
+    }),
+
+  // Get user's vote history (requires authentication)
+  getUserVoteHistory: protectedProcedure
+    .input(getUserVoteHistorySchema)
+    .query(async ({ ctx, input }) => {
+      return await votingService.getUserVoteHistory(ctx.user.id, input.competitionId);
+    }),
+
+  // Get top photos (public)
+  getTopPhotos: publicProcedure
+    .input(getTopPhotosSchema)
+    .query(async ({ input }) => {
+      const { competitionId, categoryId, limit } = input;
+      return await votingService.getTopPhotos(competitionId, categoryId, limit);
+    }),
+
+  // Get voting statistics (public)
+  getVotingStats: publicProcedure
+    .input(z.object({ competitionId: idSchema }))
+    .query(async ({ input }) => {
+      return await votingService.getVotingStats(input.competitionId);
+    }),
+});
 ```
 
 ## Implementation
@@ -446,128 +471,72 @@ export class VotingService {
 }
 ```
 
-### 2. Voting API Routes
+### 2. Client-Side Usage with tRPC
 
-#### File: `api/routes/voting.ts`
+#### Custom Hooks for Voting
 
 ```typescript
-import { Hono } from 'hono';
-import { VotingService } from '../services/voting.service';
-import { authMiddleware, optionalAuth } from '../../workers/auth-middleware';
+// File: app/hooks/use-voting.ts
+import { trpc } from '~/utils/trpc';
 
-const app = new Hono();
-const votingService = new VotingService();
-
-// Cast vote (requires authentication)
-app.post('/photos/:photoId/vote', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const { photoId } = c.req.param();
-
-  if (!user) {
-    return c.json({ error: 'Authentication required' }, 401);
-  }
-
-  try {
-    const result = await votingService.castVote(user.id, photoId);
+export function useVoting() {
+  return {
+    // Cast vote with optimistic updates
+    useCastVote: () => trpc.voting.castVote.useMutation(),
     
-    if (!result.success) {
-      return c.json({ error: result.error }, 400);
-    }
+    // Get vote status for a photo
+    useVoteStatus: (photoId: string) =>
+      trpc.voting.getVoteStatus.useQuery(
+        { photoId },
+        { enabled: !!photoId }
+      ),
 
-    return c.json({
-      success: true,
-      voteCount: result.voteCount,
-      userHasVoted: true,
-    });
-  } catch (error) {
-    return c.json({ error: 'Failed to cast vote' }, 500);
-  }
-});
+    // Get photos with votes (with optional filtering)
+    usePhotosWithVotes: (params: {
+      competitionId: string;
+      categoryId?: string;
+      sortBy?: 'votes' | 'date' | 'title';
+      order?: 'asc' | 'desc';
+      limit?: number;
+      offset?: number;
+    }) =>
+      trpc.voting.getPhotosWithVotes.useQuery(params, {
+        enabled: !!params.competitionId,
+        staleTime: 30 * 1000, // Vote counts change frequently
+      }),
 
-// Get vote status for a photo (optional authentication)
-app.get('/photos/:photoId/votes', optionalAuth, async (c) => {
-  const user = c.get('user');
-  const { photoId } = c.req.param();
+    // Get user's vote history
+    useUserVoteHistory: (competitionId?: string) =>
+      trpc.voting.getUserVoteHistory.useQuery(
+        { competitionId },
+        { staleTime: 5 * 60 * 1000 } // Vote history is relatively stable
+      ),
 
-  try {
-    const status = await votingService.getUserVoteStatus(user?.id, photoId);
-    return c.json(status);
-  } catch (error) {
-    return c.json({ error: 'Failed to get vote status' }, 500);
-  }
-});
+    // Get top photos
+    useTopPhotos: (params: {
+      competitionId: string;
+      categoryId?: string;
+      limit?: number;
+    }) =>
+      trpc.voting.getTopPhotos.useQuery(params, {
+        enabled: !!params.competitionId,
+        staleTime: 2 * 60 * 1000, // Top photos change moderately
+      }),
 
-// Get photos with votes (optional authentication for user status)
-app.get('/competitions/:competitionId/photos', optionalAuth, async (c) => {
-  const user = c.get('user');
-  const { competitionId } = c.req.param();
-  
-  const categoryId = c.req.query('categoryId');
-  const sortBy = c.req.query('sortBy') as 'votes' | 'date' | 'title' || 'votes';
-  const order = c.req.query('order') as 'asc' | 'desc' || 'desc';
-  const limit = parseInt(c.req.query('limit') || '20');
-  const offset = parseInt(c.req.query('offset') || '0');
-
-  try {
-    const result = await votingService.getPhotosWithVotes(
-      competitionId,
-      { categoryId, sortBy, order, limit, offset },
-      user?.id
-    );
-
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: 'Failed to get photos' }, 500);
-  }
-});
-
-// Get user's vote history (requires authentication)
-app.get('/votes/mine', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const competitionId = c.req.query('competitionId');
-
-  if (!user) {
-    return c.json({ error: 'Authentication required' }, 401);
-  }
-
-  try {
-    const result = await votingService.getUserVoteHistory(user.id, competitionId);
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: 'Failed to get vote history' }, 500);
-  }
-});
-
-// Get top photos (public)
-app.get('/competitions/:competitionId/top', async (c) => {
-  const { competitionId } = c.req.param();
-  const categoryId = c.req.query('categoryId');
-  const limit = parseInt(c.req.query('limit') || '10');
-
-  try {
-    const result = await votingService.getTopPhotos(competitionId, categoryId, limit);
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: 'Failed to get top photos' }, 500);
-  }
-});
-
-// Get voting statistics (public)
-app.get('/competitions/:competitionId/stats', async (c) => {
-  const { competitionId } = c.req.param();
-
-  try {
-    const stats = await votingService.getVotingStats(competitionId);
-    return c.json(stats);
-  } catch (error) {
-    return c.json({ error: 'Failed to get voting stats' }, 500);
-  }
-});
-
-export default app;
+    // Get voting statistics
+    useVotingStats: (competitionId: string) =>
+      trpc.voting.getVotingStats.useQuery(
+        { competitionId },
+        { 
+          enabled: !!competitionId,
+          staleTime: 5 * 60 * 1000,
+        }
+      ),
+  };
+}
 ```
 
-### 3. Frontend Voting Components
+### 3. Frontend Voting Components with tRPC
 
 #### File: `app/components/vote-button.tsx`
 
@@ -576,6 +545,8 @@ import { useState } from 'react';
 import { Button } from '~/components/ui/button';
 import { Heart } from 'lucide-react';
 import { useAuth } from '~/hooks/use-auth';
+import { useVoting } from '~/hooks/use-voting';
+import { trpc } from '~/utils/trpc';
 
 interface VoteButtonProps {
   photoId: string;
@@ -593,34 +564,34 @@ export function VoteButton({
   onVoteChange,
 }: VoteButtonProps) {
   const { isAuthenticated } = useAuth();
+  const { useCastVote } = useVoting();
+  const utils = trpc.useUtils();
+  
   const [voteCount, setVoteCount] = useState(initialVoteCount);
   const [userHasVoted, setUserHasVoted] = useState(initialUserHasVoted);
-  const [loading, setLoading] = useState(false);
+
+  const voteMutation = useCastVote();
 
   const handleVote = async () => {
     if (!isAuthenticated || !canVote || userHasVoted) return;
-
-    setLoading(true);
     
     try {
-      const response = await fetch(`/api/photos/${photoId}/vote`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        setVoteCount(result.voteCount);
-        setUserHasVoted(true);
-        onVoteChange?.(result.voteCount, true);
-      } else {
-        const error = await response.json();
-        alert(error.error || 'Failed to vote');
-      }
+      const result = await voteMutation.mutateAsync({ photoId });
+      
+      // Update local state
+      setVoteCount(result.voteCount);
+      setUserHasVoted(true);
+      onVoteChange?.(result.voteCount, true);
+      
+      // Invalidate related queries to refresh data
+      utils.voting.getVoteStatus.invalidate({ photoId });
+      utils.voting.getPhotosWithVotes.invalidate();
+      utils.voting.getTopPhotos.invalidate();
+      utils.voting.getVotingStats.invalidate();
+      
     } catch (error) {
-      alert('Failed to vote');
-    } finally {
-      setLoading(false);
+      // Error handling is built into tRPC
+      console.error('Vote error:', error);
     }
   };
 
@@ -639,17 +610,20 @@ export function VoteButton({
       variant={userHasVoted ? "default" : "outline"}
       size="sm"
       onClick={handleVote}
-      disabled={loading || !canVote || userHasVoted}
+      disabled={voteMutation.isLoading || !canVote || userHasVoted}
       className="flex items-center gap-2"
     >
       <Heart 
         className={`w-5 h-5 ${userHasVoted ? 'fill-current' : ''}`} 
       />
       <span>{voteCount}</span>
-      {loading && <span>...</span>}
+      {voteMutation.isLoading && <span>...</span>}
       {userHasVoted && <span className="text-sm">Voted</span>}
       {!canVote && !userHasVoted && isAuthenticated && (
         <span className="text-sm">Can't vote</span>
+      )}
+      {voteMutation.error && (
+        <span className="text-sm text-red-500">Error</span>
       )}
     </Button>
   );
@@ -659,28 +633,10 @@ export function VoteButton({
 #### File: `app/components/photo-gallery.tsx`
 
 ```typescript
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { VoteButton } from './vote-button';
 import { Button } from '~/components/ui/button';
-
-interface Photo {
-  id: string;
-  title: string;
-  description: string;
-  filePath: string;
-  voteCount: number;
-  userHasVoted: boolean;
-  canVote: boolean;
-  categoryName: string;
-  photographer: {
-    id: string;
-    email: string;
-  };
-  dateTaken: string;
-  location: string;
-  cameraInfo?: string;
-  settings?: string;
-}
+import { useVoting } from '~/hooks/use-voting';
 
 interface PhotoGalleryProps {
   competitionId: string;
@@ -695,55 +651,34 @@ export function PhotoGallery({
   sortBy = 'votes', 
   order = 'desc' 
 }: PhotoGalleryProps) {
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
+  const [allPhotos, setAllPhotos] = useState<any[]>([]);
+  
+  const { usePhotosWithVotes } = useVoting();
 
-  const loadPhotos = async (reset = false) => {
-    setLoading(true);
-    
-    const offset = reset ? 0 : (page - 1) * 20;
-    const params = new URLSearchParams({
-      sortBy,
-      order,
-      limit: '20',
-      offset: offset.toString(),
-    });
-    
-    if (categoryId) params.append('categoryId', categoryId);
+  // Get photos with tRPC
+  const { 
+    data: photosData, 
+    isLoading, 
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = usePhotosWithVotes({
+    competitionId,
+    categoryId,
+    sortBy,
+    order,
+    limit: 20,
+    offset: (page - 1) * 20,
+  });
 
-    try {
-      const response = await fetch(
-        `/api/competitions/${competitionId}/photos?${params}`,
-        { credentials: 'include' }
-      );
-      
-      if (response.ok) {
-        const result = await response.json();
-        
-        if (reset) {
-          setPhotos(result.photos);
-          setPage(1);
-        } else {
-          setPhotos(prev => [...prev, ...result.photos]);
-        }
-        
-        setHasMore(result.photos.length === 20);
-      }
-    } catch (error) {
-      console.error('Failed to load photos:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadPhotos(true);
-  }, [competitionId, categoryId, sortBy, order]);
+  const photos = photosData?.photos || [];
 
   const handleVoteChange = (photoId: string, newVoteCount: number, userHasVoted: boolean) => {
-    setPhotos(prev => prev.map(photo => 
+    // With tRPC, the data will be automatically invalidated and refetched
+    // But we can also update local state for immediate feedback
+    setAllPhotos(prev => prev.map(photo => 
       photo.id === photoId 
         ? { ...photo, voteCount: newVoteCount, userHasVoted, canVote: false }
         : photo
@@ -752,8 +687,15 @@ export function PhotoGallery({
 
   const loadMore = () => {
     setPage(prev => prev + 1);
-    loadPhotos();
   };
+
+  if (error) {
+    return (
+      <div className="text-center text-red-500">
+        Error loading photos: {error.message}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -764,6 +706,7 @@ export function PhotoGallery({
               src={photo.filePath}
               alt={photo.title}
               className="w-full h-64 object-cover"
+              loading="lazy"
             />
             
             <div className="p-4 space-y-3">
@@ -798,22 +741,150 @@ export function PhotoGallery({
         ))}
       </div>
 
-      {loading && <div className="text-center">Loading...</div>}
+      {isLoading && <div className="text-center">Loading photos...</div>}
       
-      {hasMore && !loading && (
+      {photos.length >= 20 && !isLoading && (
         <div className="text-center">
-          <Button onClick={loadMore}>Load More</Button>
+          <Button onClick={loadMore} disabled={isFetchingNextPage}>
+            {isFetchingNextPage ? 'Loading...' : 'Load More'}
+          </Button>
         </div>
       )}
       
-      {!hasMore && photos.length > 0 && (
+      {photos.length > 0 && photos.length < 20 && (
         <div className="text-center text-gray-500">No more photos</div>
       )}
       
-      {!loading && photos.length === 0 && (
+      {!isLoading && photos.length === 0 && (
         <div className="text-center text-gray-500">No photos found</div>
       )}
     </div>
+  );
+}
+```
+
+### 4. Optimistic Updates Example
+
+#### File: `app/components/optimistic-vote-button.tsx`
+
+```typescript
+import { Button } from '~/components/ui/button';
+import { Heart } from 'lucide-react';
+import { useAuth } from '~/hooks/use-auth';
+import { useVoting } from '~/hooks/use-voting';
+import { trpc } from '~/utils/trpc';
+
+interface OptimisticVoteButtonProps {
+  photoId: string;
+  competitionId: string;
+}
+
+export function OptimisticVoteButton({ photoId, competitionId }: OptimisticVoteButtonProps) {
+  const { isAuthenticated } = useAuth();
+  const { useCastVote, useVoteStatus } = useVoting();
+  const utils = trpc.useUtils();
+  
+  const { data: voteStatus } = useVoteStatus(photoId);
+
+  const voteMutation = useCastVote({
+    onMutate: async ({ photoId }) => {
+      // Cancel outgoing refetches
+      await utils.voting.getPhotosWithVotes.cancel({ competitionId });
+      await utils.voting.getVoteStatus.cancel({ photoId });
+      
+      // Snapshot previous values
+      const previousPhotos = utils.voting.getPhotosWithVotes.getData({ competitionId });
+      const previousVoteStatus = utils.voting.getVoteStatus.getData({ photoId });
+      
+      // Optimistically update photos list
+      utils.voting.getPhotosWithVotes.setData(
+        { competitionId },
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            photos: old.photos.map(photo => 
+              photo.id === photoId 
+                ? { 
+                    ...photo, 
+                    voteCount: photo.voteCount + 1, 
+                    userHasVoted: true,
+                    canVote: false
+                  }
+                : photo
+            )
+          };
+        }
+      );
+      
+      // Optimistically update vote status
+      utils.voting.getVoteStatus.setData(
+        { photoId },
+        (old) => old ? {
+          ...old,
+          voteCount: old.voteCount + 1,
+          userHasVoted: true,
+          canVote: false,
+        } : undefined
+      );
+      
+      return { previousPhotos, previousVoteStatus };
+    },
+    onError: (err, variables, context) => {
+      // Rollback on error
+      if (context?.previousPhotos) {
+        utils.voting.getPhotosWithVotes.setData(
+          { competitionId },
+          context.previousPhotos
+        );
+      }
+      if (context?.previousVoteStatus) {
+        utils.voting.getVoteStatus.setData(
+          { photoId },
+          context.previousVoteStatus
+        );
+      }
+    },
+    onSettled: () => {
+      // Always refetch after error or success to ensure consistency
+      utils.voting.getPhotosWithVotes.invalidate({ competitionId });
+      utils.voting.getVoteStatus.invalidate({ photoId });
+      utils.voting.getTopPhotos.invalidate({ competitionId });
+    },
+  });
+
+  if (!isAuthenticated) {
+    return (
+      <div className="flex items-center gap-2 text-gray-500">
+        <Heart className="w-5 h-5" />
+        <span>{voteStatus?.voteCount || 0}</span>
+        <span className="text-sm">Login to vote</span>
+      </div>
+    );
+  }
+
+  if (!voteStatus) {
+    return <div>Loading...</div>;
+  }
+
+  return (
+    <Button
+      variant={voteStatus.userHasVoted ? "default" : "outline"}
+      size="sm"
+      onClick={() => voteMutation.mutate({ photoId })}
+      disabled={voteMutation.isLoading || !voteStatus.canVote || voteStatus.userHasVoted}
+      className="flex items-center gap-2"
+    >
+      <Heart 
+        className={`w-5 h-5 ${voteStatus.userHasVoted ? 'fill-current' : ''}`} 
+      />
+      <span>{voteStatus.voteCount}</span>
+      {voteMutation.isLoading && <span>...</span>}
+      {voteStatus.userHasVoted && <span className="text-sm">Voted</span>}
+      {!voteStatus.canVote && !voteStatus.userHasVoted && (
+        <span className="text-sm">Can't vote</span>
+      )}
+    </Button>
   );
 }
 ```

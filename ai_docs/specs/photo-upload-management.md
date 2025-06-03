@@ -38,100 +38,258 @@ Photo submission system for users to upload, manage, and edit their competition 
 - Cannot modify photos once approved by admin
 - File size and type validation on both client and server
 
-## API Endpoints
+## tRPC Procedures
 
-### Photo Upload
+### Photo Router
+
+#### File: `api/trpc/routers/photo.ts`
+
 ```typescript
-POST /api/photos/upload
-Authorization: Bearer <token>
-Content-Type: multipart/form-data
+import { z } from 'zod';
+import { createTRPCRouter, protectedProcedure } from '../trpc';
+import { PhotoService } from '../../services/photo.service';
+import { 
+  idSchema, 
+  dateStringSchema,
+  paginationSchema 
+} from '../schemas/common';
+import { 
+  SubmissionLimitExceededError, 
+  PhotoNotFoundError 
+} from '../errors';
+import { TRPCError } from '@trpc/server';
 
-Form Data:
-- file: <photo file>
-- categoryId: string
-- title: string
-- description: string (20-500 chars)
-- dateTaken: datetime
-- location: string
-- cameraInfo?: string
-- settings?: string
+// Note: File uploads in tRPC require special handling
+// We'll need to use a multipart form data parser
 
-Response:
-{
-  "id": "photo_123",
-  "title": "Mountain Wildlife",
-  "status": "pending",
-  "filePath": "/uploads/comp_123/photo_123.jpg",
-  "categoryId": "cat_1",
-  "competitionId": "comp_123",
-  "createdAt": "2024-01-15T10:00:00Z"
-}
+const photoUploadSchema = z.object({
+  categoryId: idSchema,
+  title: z.string().min(1).max(200),
+  description: z.string().min(20).max(500),
+  dateTaken: dateStringSchema,
+  location: z.string().min(1).max(200),
+  cameraInfo: z.string().max(200).optional(),
+  settings: z.string().max(200).optional(),
+  // File will be handled separately in the multipart upload
+});
+
+const photoUpdateSchema = z.object({
+  id: idSchema,
+  title: z.string().min(1).max(200).optional(),
+  description: z.string().min(20).max(500).optional(),
+  dateTaken: dateStringSchema.optional(),
+  location: z.string().min(1).max(200).optional(),
+  cameraInfo: z.string().max(200).optional(),
+  settings: z.string().max(200).optional(),
+});
+
+const getUserPhotosSchema = z.object({
+  competitionId: idSchema.optional(),
+  categoryId: idSchema.optional(),
+});
+
+const photoService = new PhotoService();
+
+export const photoRouter = createTRPCRouter({
+  // Upload photo (requires authentication)
+  // Note: This will need special handling for file uploads
+  upload: protectedProcedure
+    .input(photoUploadSchema)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        // In a real implementation, you'd extract the file from the request
+        // This might require custom middleware or a different approach
+        // For now, we'll assume the file is handled separately
+        
+        const result = await photoService.uploadPhoto({
+          userId: ctx.user.id,
+          ...input,
+          file: ctx.file, // This would need to be extracted from multipart data
+        });
+
+        return result;
+      } catch (error) {
+        if (error.message.includes('Maximum') && error.message.includes('photos allowed')) {
+          throw new SubmissionLimitExceededError(
+            parseInt(error.message.match(/\d+/)?.[0] || '0')
+          );
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
+
+  // Update photo metadata
+  update: protectedProcedure
+    .input(photoUpdateSchema)
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...updates } = input;
+      try {
+        return await photoService.updatePhoto(id, ctx.user.id, updates);
+      } catch (error) {
+        if (error.message.includes('not found')) {
+          throw new PhotoNotFoundError();
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
+
+  // Delete photo
+  delete: protectedProcedure
+    .input(z.object({ id: idSchema }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await photoService.deletePhoto(input.id, ctx.user.id);
+      } catch (error) {
+        if (error.message.includes('not found')) {
+          throw new PhotoNotFoundError();
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
+
+  // Get user's photos
+  getUserPhotos: protectedProcedure
+    .input(getUserPhotosSchema)
+    .query(async ({ ctx, input }) => {
+      return await photoService.getUserPhotos(
+        ctx.user.id, 
+        input.competitionId, 
+        input.categoryId
+      );
+    }),
+
+  // Get photo by ID (for editing)
+  getById: protectedProcedure
+    .input(z.object({ id: idSchema }))
+    .query(async ({ ctx, input }) => {
+      const photo = await photoService.getPhotoById(input.id, ctx.user.id);
+      if (!photo) {
+        throw new PhotoNotFoundError();
+      }
+      return photo;
+    }),
+
+  // Get submission counts for user
+  getSubmissionCounts: protectedProcedure
+    .input(z.object({ competitionId: idSchema.optional() }))
+    .query(async ({ ctx, input }) => {
+      return await photoService.getUserSubmissionCounts(
+        ctx.user.id, 
+        input.competitionId
+      );
+    }),
+});
 ```
 
-### Update Photo Metadata
+### Alternative File Upload Approach
+
+Since tRPC doesn't handle multipart form data natively, we have a few options:
+
+#### Option 1: Custom Upload Endpoint + tRPC Metadata
+
 ```typescript
-PUT /api/photos/:id
-Authorization: Bearer <token>
+// File: api/routes/upload.ts (traditional endpoint for file handling)
+import { Hono } from 'hono';
+import { authMiddleware } from '../../workers/auth-middleware';
 
-Request:
-{
-  "title": "Updated Photo Title",
-  "description": "Updated description with at least 20 characters",
-  "dateTaken": "2024-01-10T15:30:00Z",
-  "location": "Updated Location",
-  "cameraInfo": "Canon EOS R5",
-  "settings": "ISO 800, f/5.6, 1/500s"
-}
+const app = new Hono();
 
-Response:
-{
-  "id": "photo_123",
-  "title": "Updated Photo Title",
-  "status": "pending",
-  "updatedAt": "2024-01-15T11:00:00Z"
-}
+app.post('/photos/upload', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const formData = await c.req.formData();
+  const file = formData.get('file') as File;
+  
+  // Handle file upload and return file info
+  const fileInfo = await uploadFileToStorage(file);
+  
+  return c.json({
+    fileId: fileInfo.id,
+    filePath: fileInfo.path,
+    fileSize: file.size,
+    mimeType: file.type,
+  });
+});
+
+// Then use tRPC to create the photo record
+export const photoRouter = createTRPCRouter({
+  createFromUpload: protectedProcedure
+    .input(z.object({
+      fileId: z.string(),
+      filePath: z.string(),
+      fileSize: z.number(),
+      mimeType: z.string(),
+      categoryId: idSchema,
+      title: z.string().min(1).max(200),
+      description: z.string().min(20).max(500),
+      dateTaken: dateStringSchema,
+      location: z.string().min(1).max(200),
+      cameraInfo: z.string().max(200).optional(),
+      settings: z.string().max(200).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      return await photoService.createPhotoFromUpload({
+        userId: ctx.user.id,
+        ...input,
+      });
+    }),
+});
 ```
 
-### Delete Photo
+#### Option 2: Base64 Upload (for smaller files)
+
 ```typescript
-DELETE /api/photos/:id
-Authorization: Bearer <token>
+export const photoRouter = createTRPCRouter({
+  uploadBase64: protectedProcedure
+    .input(z.object({
+      fileData: z.string(), // Base64 encoded file
+      fileName: z.string(),
+      mimeType: z.enum(['image/jpeg', 'image/png']),
+      categoryId: idSchema,
+      title: z.string().min(1).max(200),
+      description: z.string().min(20).max(500),
+      dateTaken: dateStringSchema,
+      location: z.string().min(1).max(200),
+      cameraInfo: z.string().max(200).optional(),
+      settings: z.string().max(200).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      // Decode base64 and create file
+      const fileBuffer = Buffer.from(input.fileData, 'base64');
+      
+      // Validate file size (10MB limit)
+      if (fileBuffer.length > 10 * 1024 * 1024) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'File size cannot exceed 10MB',
+        });
+      }
 
-Response:
-{
-  "success": true,
-  "message": "Photo deleted successfully"
-}
-```
+      const file = new File([fileBuffer], input.fileName, {
+        type: input.mimeType,
+      });
 
-### Get User Photos
-```typescript
-GET /api/photos/mine?competitionId=comp_123&categoryId=cat_1
-
-Response:
-{
-  "photos": [
-    {
-      "id": "photo_123",
-      "title": "Mountain Wildlife",
-      "description": "A beautiful capture of wildlife in their natural habitat...",
-      "status": "pending",
-      "categoryId": "cat_1",
-      "categoryName": "Landscape",
-      "filePath": "/uploads/comp_123/photo_123.jpg",
-      "voteCount": 0,
-      "createdAt": "2024-01-15T10:00:00Z"
-    }
-  ],
-  "submissionCounts": {
-    "cat_1": 2,
-    "cat_2": 1
-  },
-  "limits": {
-    "cat_1": 5,
-    "cat_2": 3
-  }
-}
+      return await photoService.uploadPhoto({
+        userId: ctx.user.id,
+        categoryId: input.categoryId,
+        title: input.title,
+        description: input.description,
+        dateTaken: input.dateTaken,
+        location: input.location,
+        cameraInfo: input.cameraInfo,
+        settings: input.settings,
+        file,
+      });
+    }),
+});
 ```
 
 ## Implementation
@@ -425,96 +583,76 @@ export class PhotoService {
 }
 ```
 
-### 2. Photo Upload API Routes
+### 2. Client-Side Usage with tRPC
 
-#### File: `api/routes/photos.ts`
+#### Custom Hooks for Photo Management
 
 ```typescript
-import { Hono } from 'hono';
-import { PhotoService } from '../services/photo.service';
-import { authMiddleware } from '../../workers/auth-middleware';
+// File: app/hooks/use-photos.ts
+import { trpc } from '~/utils/trpc';
 
-const app = new Hono();
-const photoService = new PhotoService();
+export function usePhotos() {
+  return {
+    // Get user's photos
+    useUserPhotos: (params: { competitionId?: string; categoryId?: string }) =>
+      trpc.photo.getUserPhotos.useQuery(params),
 
-// User photo management
-app.use('/*', authMiddleware);
+    // Get photo by ID for editing
+    usePhotoById: (id: string) =>
+      trpc.photo.getById.useQuery(
+        { id },
+        { enabled: !!id }
+      ),
 
-app.post('/upload', async (c) => {
-  const user = c.get('user');
-  if (!user) {
-    return c.json({ error: 'Authentication required' }, 401);
-  }
+    // Get submission counts
+    useSubmissionCounts: (competitionId?: string) =>
+      trpc.photo.getSubmissionCounts.useQuery(
+        { competitionId },
+        { staleTime: 5 * 60 * 1000 } // Counts are relatively stable
+      ),
 
-  try {
-    const formData = await c.req.formData();
-    const file = formData.get('file') as File;
-    
-    if (!file) {
-      return c.json({ error: 'Photo file is required' }, 400);
-    }
+    // Mutations
+    useUpload: () => trpc.photo.upload.useMutation(),
+    useUploadBase64: () => trpc.photo.uploadBase64.useMutation(),
+    useCreateFromUpload: () => trpc.photo.createFromUpload.useMutation(),
+    useUpdate: () => trpc.photo.update.useMutation(),
+    useDelete: () => trpc.photo.delete.useMutation(),
+  };
+}
 
-    const photoData = {
-      userId: user.id,
-      categoryId: formData.get('categoryId') as string,
-      title: formData.get('title') as string,
-      description: formData.get('description') as string,
-      dateTaken: formData.get('dateTaken') as string,
-      location: formData.get('location') as string,
-      cameraInfo: formData.get('cameraInfo') as string || undefined,
-      settings: formData.get('settings') as string || undefined,
-      file,
+// Utility functions for file handling
+export function convertFileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Remove data URL prefix (e.g., "data:image/jpeg;base64,")
+      const base64 = result.split(',')[1];
+      resolve(base64);
     };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
-    const photo = await photoService.uploadPhoto(photoData);
-    return c.json(photo, 201);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
+export function validatePhotoFile(file: File): { valid: boolean; error?: string } {
+  // File type validation
+  const allowedTypes = ['image/jpeg', 'image/png'];
+  if (!allowedTypes.includes(file.type)) {
+    return { valid: false, error: 'Only JPEG and PNG files are allowed' };
   }
-});
 
-app.put('/:id', async (c) => {
-  const user = c.get('user');
-  const { id } = c.req.param();
-  const updates = await c.req.json();
-
-  try {
-    const photo = await photoService.updatePhoto(id, user.id, updates);
-    return c.json(photo);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
+  // File size validation (10MB)
+  const maxSize = 10 * 1024 * 1024;
+  if (file.size > maxSize) {
+    return { valid: false, error: 'File size cannot exceed 10MB' };
   }
-});
 
-app.delete('/:id', async (c) => {
-  const user = c.get('user');
-  const { id } = c.req.param();
-
-  try {
-    const result = await photoService.deletePhoto(id, user.id);
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.get('/mine', async (c) => {
-  const user = c.get('user');
-  const competitionId = c.req.query('competitionId');
-  const categoryId = c.req.query('categoryId');
-
-  try {
-    const result = await photoService.getUserPhotos(user.id, competitionId, categoryId);
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-export default app;
+  return { valid: true };
+}
 ```
 
-### 3. Frontend Upload Component
+### 3. Frontend Upload Component with tRPC
 
 #### File: `app/components/photo-upload.tsx`
 
@@ -523,28 +661,21 @@ import { useState, useRef } from 'react';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
 import { Textarea } from '~/components/ui/textarea';
-import { useSubmitPost } from '~/hooks/use-submit-post';
+import { usePhotos, convertFileToBase64, validatePhotoFile } from '~/hooks/use-photos';
+import { useCompetitions } from '~/hooks/use-competitions';
+import { trpc } from '~/utils/trpc';
 
 interface PhotoUploadProps {
   competitionId: string;
-  categories: Array<{
-    id: string;
-    name: string;
-    maxPhotosPerUser: number;
-  }>;
-  userSubmissionCounts: Record<string, number>;
   onSuccess?: (photo: any) => void;
 }
 
-export function PhotoUpload({ 
-  competitionId, 
-  categories, 
-  userSubmissionCounts,
-  onSuccess 
-}: PhotoUploadProps) {
+export function PhotoUpload({ competitionId, onSuccess }: PhotoUploadProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [uploadMethod, setUploadMethod] = useState<'base64' | 'traditional'>('base64');
+  
   const [formData, setFormData] = useState({
     categoryId: '',
     title: '',
@@ -555,21 +686,32 @@ export function PhotoUpload({
     settings: '',
   });
 
-  const { submit, loading, error } = useSubmitPost('/api/photos/upload');
+  const { useById: useCompetitionById } = useCompetitions();
+  const { 
+    useUploadBase64, 
+    useCreateFromUpload, 
+    useSubmissionCounts 
+  } = usePhotos();
+  const utils = trpc.useUtils();
+
+  // Get competition and categories
+  const { data: competition } = useCompetitionById(competitionId);
+  const { data: submissionCounts } = useSubmissionCounts(competitionId);
+
+  const uploadBase64Mutation = useUploadBase64();
+  const createFromUploadMutation = useCreateFromUpload();
+
+  const categories = competition?.categories || [];
+  const userSubmissionCounts = submissionCounts || {};
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
-    if (!['image/jpeg', 'image/png'].includes(file.type)) {
-      alert('Only JPEG and PNG files are allowed');
-      return;
-    }
-
-    // Validate file size (10MB)
-    if (file.size > 10 * 1024 * 1024) {
-      alert('File size cannot exceed 10MB');
+    // Validate file
+    const validation = validatePhotoFile(file);
+    if (!validation.valid) {
+      alert(validation.error);
       return;
     }
 
@@ -626,23 +768,61 @@ export function PhotoUpload({
     }
 
     try {
-      const submitData = new FormData();
-      submitData.append('file', selectedFile);
-      submitData.append('categoryId', formData.categoryId);
-      submitData.append('title', formData.title.trim());
-      submitData.append('description', description);
-      submitData.append('dateTaken', formData.dateTaken);
-      submitData.append('location', formData.location.trim());
-      
-      if (formData.cameraInfo.trim()) {
-        submitData.append('cameraInfo', formData.cameraInfo.trim());
-      }
-      
-      if (formData.settings.trim()) {
-        submitData.append('settings', formData.settings.trim());
-      }
+      let result;
 
-      const result = await submit(submitData);
+      if (uploadMethod === 'base64') {
+        // Convert file to base64 and upload via tRPC
+        const base64Data = await convertFileToBase64(selectedFile);
+        
+        result = await uploadBase64Mutation.mutateAsync({
+          fileData: base64Data,
+          fileName: selectedFile.name,
+          mimeType: selectedFile.type as 'image/jpeg' | 'image/png',
+          categoryId: formData.categoryId,
+          title: formData.title.trim(),
+          description: description,
+          dateTaken: formData.dateTaken,
+          location: formData.location.trim(),
+          cameraInfo: formData.cameraInfo.trim() || undefined,
+          settings: formData.settings.trim() || undefined,
+        });
+      } else {
+        // Use traditional upload endpoint + tRPC metadata
+        // First upload file to get file info
+        const fileFormData = new FormData();
+        fileFormData.append('file', selectedFile);
+        
+        const uploadResponse = await fetch('/api/photos/upload', {
+          method: 'POST',
+          body: fileFormData,
+          credentials: 'include',
+        });
+        
+        if (!uploadResponse.ok) {
+          throw new Error('File upload failed');
+        }
+        
+        const fileInfo = await uploadResponse.json();
+        
+        // Then create photo record via tRPC
+        result = await createFromUploadMutation.mutateAsync({
+          fileId: fileInfo.fileId,
+          filePath: fileInfo.filePath,
+          fileSize: fileInfo.fileSize,
+          mimeType: fileInfo.mimeType,
+          categoryId: formData.categoryId,
+          title: formData.title.trim(),
+          description: description,
+          dateTaken: formData.dateTaken,
+          location: formData.location.trim(),
+          cameraInfo: formData.cameraInfo.trim() || undefined,
+          settings: formData.settings.trim() || undefined,
+        });
+      }
+      
+      // Invalidate relevant queries
+      utils.photo.getUserPhotos.invalidate();
+      utils.photo.getSubmissionCounts.invalidate();
       
       // Reset form
       setSelectedFile(null);
@@ -662,8 +842,9 @@ export function PhotoUpload({
       }
 
       onSuccess?.(result);
-    } catch (err) {
-      console.error('Upload error:', err);
+    } catch (error) {
+      console.error('Upload error:', error);
+      // Error is displayed via tRPC error handling
     }
   };
 
@@ -675,9 +856,41 @@ export function PhotoUpload({
   };
 
   const availableCategories = getAvailableCategories();
+  const isLoading = uploadBase64Mutation.isLoading || createFromUploadMutation.isLoading;
+  const error = uploadBase64Mutation.error || createFromUploadMutation.error;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {/* Upload Method Selection */}
+      <div>
+        <label className="block mb-2">Upload Method</label>
+        <div className="flex gap-4">
+          <label className="flex items-center">
+            <input
+              type="radio"
+              value="base64"
+              checked={uploadMethod === 'base64'}
+              onChange={(e) => setUploadMethod(e.target.value as 'base64')}
+              className="mr-2"
+            />
+            Base64 Upload (tRPC)
+          </label>
+          <label className="flex items-center">
+            <input
+              type="radio"
+              value="traditional"
+              checked={uploadMethod === 'traditional'}
+              onChange={(e) => setUploadMethod(e.target.value as 'traditional')}
+              className="mr-2"
+            />
+            Traditional Upload + tRPC
+          </label>
+        </div>
+        <p className="text-sm text-gray-500 mt-1">
+          Base64 is simpler but has size limitations. Traditional upload supports larger files.
+        </p>
+      </div>
+
       {/* File Upload */}
       <div>
         <label className="block mb-2">Photo File</label>
@@ -805,16 +1018,218 @@ export function PhotoUpload({
       </div>
 
       {error && (
-        <div className="text-red-500 text-sm">{error}</div>
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
+          {error.message}
+        </div>
       )}
 
       <Button 
         type="submit" 
-        disabled={loading || !selectedFile || availableCategories.length === 0}
+        disabled={isLoading || !selectedFile || availableCategories.length === 0}
       >
-        {loading ? 'Uploading...' : 'Submit Photo'}
+        {isLoading ? 'Uploading...' : 'Submit Photo'}
       </Button>
     </form>
+  );
+}
+```
+
+### 4. Photo Management Component
+
+#### File: `app/components/user-photos.tsx`
+
+```typescript
+import { useState } from 'react';
+import { usePhotos } from '~/hooks/use-photos';
+import { Button } from '~/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card';
+import { trpc } from '~/utils/trpc';
+
+interface UserPhotosProps {
+  competitionId?: string;
+  categoryId?: string;
+}
+
+export function UserPhotos({ competitionId, categoryId }: UserPhotosProps) {
+  const { useUserPhotos, useUpdate, useDelete } = usePhotos();
+  const utils = trpc.useUtils();
+  
+  const { 
+    data: photosData, 
+    isLoading, 
+    error 
+  } = useUserPhotos({ competitionId, categoryId });
+
+  const updateMutation = useUpdate();
+  const deleteMutation = useDelete();
+
+  const [editingPhoto, setEditingPhoto] = useState<string | null>(null);
+  const [editFormData, setEditFormData] = useState({
+    title: '',
+    description: '',
+    location: '',
+    cameraInfo: '',
+    settings: '',
+  });
+
+  const handleEdit = (photo: any) => {
+    setEditingPhoto(photo.id);
+    setEditFormData({
+      title: photo.title,
+      description: photo.description,
+      location: photo.location,
+      cameraInfo: photo.cameraInfo || '',
+      settings: photo.settings || '',
+    });
+  };
+
+  const handleSaveEdit = async (photoId: string) => {
+    try {
+      await updateMutation.mutateAsync({
+        id: photoId,
+        ...editFormData,
+      });
+      
+      // Refresh photos list
+      utils.photo.getUserPhotos.invalidate();
+      
+      setEditingPhoto(null);
+    } catch (error) {
+      console.error('Update error:', error);
+    }
+  };
+
+  const handleDelete = async (photoId: string, photoTitle: string) => {
+    if (confirm(`Are you sure you want to delete "${photoTitle}"?`)) {
+      try {
+        await deleteMutation.mutateAsync({ id: photoId });
+        
+        // Refresh photos list and submission counts
+        utils.photo.getUserPhotos.invalidate();
+        utils.photo.getSubmissionCounts.invalidate();
+        
+      } catch (error) {
+        console.error('Delete error:', error);
+      }
+    }
+  };
+
+  if (isLoading) return <div>Loading your photos...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  const photos = photosData?.photos || [];
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-2xl font-bold">Your Photos</h2>
+      
+      {photos.length === 0 ? (
+        <div className="text-center text-gray-500 py-8">
+          No photos uploaded yet. Upload your first photo to get started!
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {photos.map((photo) => (
+            <Card key={photo.id}>
+              <div className="relative">
+                <img
+                  src={photo.filePath}
+                  alt={photo.title}
+                  className="w-full h-48 object-cover rounded-t-lg"
+                />
+                <div className={`absolute top-2 right-2 px-2 py-1 rounded text-xs font-medium ${
+                  photo.status === 'approved' ? 'bg-green-100 text-green-800' :
+                  photo.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                  'bg-yellow-100 text-yellow-800'
+                }`}>
+                  {photo.status}
+                </div>
+              </div>
+              
+              <CardHeader>
+                <CardTitle className="text-lg">{photo.title}</CardTitle>
+                <p className="text-sm text-gray-600">{photo.categoryName}</p>
+              </CardHeader>
+              
+              <CardContent className="space-y-3">
+                {editingPhoto === photo.id ? (
+                  <div className="space-y-2">
+                    <input
+                      value={editFormData.title}
+                      onChange={(e) => setEditFormData(prev => ({ ...prev, title: e.target.value }))}
+                      className="w-full p-2 border rounded"
+                      placeholder="Title"
+                    />
+                    <textarea
+                      value={editFormData.description}
+                      onChange={(e) => setEditFormData(prev => ({ ...prev, description: e.target.value }))}
+                      className="w-full p-2 border rounded h-24"
+                      placeholder="Description"
+                    />
+                    <input
+                      value={editFormData.location}
+                      onChange={(e) => setEditFormData(prev => ({ ...prev, location: e.target.value }))}
+                      className="w-full p-2 border rounded"
+                      placeholder="Location"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => handleSaveEdit(photo.id)}
+                        disabled={updateMutation.isLoading}
+                      >
+                        {updateMutation.isLoading ? 'Saving...' : 'Save'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setEditingPhoto(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-sm text-gray-700 line-clamp-3">
+                      {photo.description}
+                    </p>
+                    
+                    <div className="text-xs text-gray-500 space-y-1">
+                      <p>📍 {photo.location}</p>
+                      <p>📅 {new Date(photo.dateTaken).toLocaleDateString()}</p>
+                      {photo.cameraInfo && <p>📷 {photo.cameraInfo}</p>}
+                      {photo.settings && <p>⚙️ {photo.settings}</p>}
+                      {photo.voteCount > 0 && <p>❤️ {photo.voteCount} votes</p>}
+                    </div>
+                    
+                    {photo.status === 'pending' && (
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleEdit(photo)}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleDelete(photo.id, photo.title)}
+                          disabled={deleteMutation.isLoading}
+                        >
+                          Delete
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 ```

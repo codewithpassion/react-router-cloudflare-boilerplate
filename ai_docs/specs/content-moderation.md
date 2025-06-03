@@ -49,217 +49,201 @@ interface Report {
 }
 ```
 
-## API Endpoints
+## tRPC Procedures
 
-### Photo Moderation (Admin Only)
+### Moderation Router
 
-#### Get Pending Photos
+#### File: `api/trpc/routers/moderation.ts`
+
 ```typescript
-GET /api/admin/photos/pending?limit=20&offset=0&competitionId=comp_123
-Authorization: Bearer <token>
+import { z } from 'zod';
+import { createTRPCRouter, protectedProcedure, adminProcedure } from '../trpc';
+import { ModerationService } from '../../services/moderation.service';
+import { 
+  idSchema, 
+  paginationSchema,
+  reportReasonSchema,
+  reportStatusSchema 
+} from '../schemas/common';
+import { PhotoNotFoundError } from '../errors';
+import { TRPCError } from '@trpc/server';
 
-Response:
-{
-  "photos": [
-    {
-      "id": "photo_123",
-      "title": "Mountain Wildlife",
-      "description": "Beautiful capture...",
-      "filePath": "/uploads/comp_123/photo_123.jpg",
-      "categoryName": "Landscape",
-      "photographer": {
-        "id": "user_456",
-        "email": "photographer@example.com"
-      },
-      "submittedAt": "2024-01-15T10:00:00Z",
-      "metadata": {
-        "dateTaken": "2024-01-10T15:30:00Z",
-        "location": "Rocky Mountains",
-        "cameraInfo": "Canon EOS R5",
-        "settings": "ISO 800, f/5.6, 1/500s"
+const getPendingPhotosSchema = paginationSchema.extend({
+  competitionId: idSchema.optional(),
+});
+
+const moderatePhotoSchema = z.object({
+  id: idSchema,
+  reason: z.string().min(1).max(500).optional(),
+});
+
+const bulkActionSchema = z.object({
+  action: z.enum(['approve', 'reject', 'delete']),
+  photoIds: z.array(idSchema).min(1).max(50),
+  reason: z.string().min(1).max(500).optional(),
+});
+
+const createReportSchema = z.object({
+  photoId: idSchema,
+  reason: reportReasonSchema,
+  description: z.string().min(1).max(1000).optional(),
+});
+
+const getReportsSchema = paginationSchema.extend({
+  status: reportStatusSchema.optional(),
+});
+
+const resolveReportSchema = z.object({
+  id: idSchema,
+  action: z.enum(['resolved', 'dismissed']),
+  adminNotes: z.string().max(1000).optional(),
+  photoAction: z.enum(['approve', 'reject', 'delete']).optional(),
+  photoActionReason: z.string().max(500).optional(),
+});
+
+const moderationService = new ModerationService();
+
+export const moderationRouter = createTRPCRouter({
+  // Photo moderation (Admin only)
+  getPendingPhotos: adminProcedure
+    .input(getPendingPhotosSchema)
+    .query(async ({ input }) => {
+      return await moderationService.getPendingPhotos(input);
+    }),
+
+  approvePhoto: adminProcedure
+    .input(z.object({ id: idSchema }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await moderationService.approvePhoto(input.id, ctx.user.id);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
       }
-    }
-  ],
-  "total": 5,
-  "limit": 20,
-  "offset": 0
-}
-```
+    }),
 
-#### Approve Photo
-```typescript
-POST /api/admin/photos/:id/approve
-Authorization: Bearer <token>
+  rejectPhoto: adminProcedure
+    .input(moderatePhotoSchema)
+    .mutation(async ({ ctx, input }) => {
+      if (!input.reason) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Rejection reason is required',
+        });
+      }
+      
+      try {
+        return await moderationService.rejectPhoto(input.id, ctx.user.id, input.reason);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Response:
-{
-  "id": "photo_123",
-  "status": "approved",
-  "approvedBy": "admin_789",
-  "approvedAt": "2024-01-15T11:00:00Z"
-}
-```
+  deletePhoto: adminProcedure
+    .input(moderatePhotoSchema)
+    .mutation(async ({ ctx, input }) => {
+      if (!input.reason) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Deletion reason is required',
+        });
+      }
+      
+      try {
+        return await moderationService.deletePhoto(input.id, ctx.user.id, input.reason);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-#### Reject Photo
-```typescript
-POST /api/admin/photos/:id/reject
-Authorization: Bearer <token>
+  bulkPhotoAction: adminProcedure
+    .input(bulkActionSchema)
+    .mutation(async ({ ctx, input }) => {
+      const { action, photoIds, reason } = input;
+      
+      if ((action === 'reject' || action === 'delete') && !reason) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `Reason is required for ${action} action`,
+        });
+      }
+      
+      try {
+        return await moderationService.bulkPhotoAction(
+          photoIds,
+          action,
+          ctx.user.id,
+          reason
+        );
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Request:
-{
-  "reason": "Poor image quality"
-}
+  // User reporting
+  createReport: protectedProcedure
+    .input(createReportSchema)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await moderationService.createReport({
+          reporterId: ctx.user.id,
+          ...input,
+        });
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Response:
-{
-  "id": "photo_123",
-  "status": "rejected",
-  "rejectionReason": "Poor image quality",
-  "rejectedBy": "admin_789",
-  "rejectedAt": "2024-01-15T11:00:00Z"
-}
-```
+  getUserReports: protectedProcedure
+    .query(async ({ ctx }) => {
+      return await moderationService.getUserReports(ctx.user.id);
+    }),
 
-#### Delete Photo
-```typescript
-DELETE /api/admin/photos/:id
-Authorization: Bearer <token>
+  // Admin report management
+  getReports: adminProcedure
+    .input(getReportsSchema)
+    .query(async ({ input }) => {
+      return await moderationService.getReports(input);
+    }),
 
-Request:
-{
-  "reason": "Inappropriate content"
-}
+  resolveReport: adminProcedure
+    .input(resolveReportSchema)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await moderationService.resolveReport(input.id, ctx.user.id, {
+          action: input.action,
+          adminNotes: input.adminNotes,
+          photoAction: input.photoAction,
+          photoActionReason: input.photoActionReason,
+        });
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Response:
-{
-  "success": true,
-  "message": "Photo deleted successfully"
-}
-```
-
-#### Bulk Photo Actions
-```typescript
-POST /api/admin/photos/bulk-action
-Authorization: Bearer <token>
-
-Request:
-{
-  "action": "approve", // or "reject" or "delete"
-  "photoIds": ["photo_123", "photo_456"],
-  "reason": "Batch approval" // for reject/delete
-}
-
-Response:
-{
-  "success": true,
-  "processed": 2,
-  "failed": 0,
-  "results": [
-    {
-      "photoId": "photo_123",
-      "status": "approved"
-    },
-    {
-      "photoId": "photo_456", 
-      "status": "approved"
-    }
-  ]
-}
-```
-
-### User Reporting
-
-#### Report Photo
-```typescript
-POST /api/photos/:photoId/report
-Authorization: Bearer <token>
-
-Request:
-{
-  "reason": "inappropriate",
-  "description": "Contains inappropriate content"
-}
-
-Response:
-{
-  "id": "report_123",
-  "status": "pending",
-  "message": "Report submitted successfully"
-}
-```
-
-#### Get User's Reports
-```typescript
-GET /api/reports/mine
-Authorization: Bearer <token>
-
-Response:
-{
-  "reports": [
-    {
-      "id": "report_123",
-      "photoId": "photo_456",
-      "photoTitle": "Mountain Scene",
-      "reason": "inappropriate",
-      "status": "pending",
-      "reportedAt": "2024-01-15T10:00:00Z"
-    }
-  ]
-}
-```
-
-### Admin Report Management
-
-#### Get Reports Queue
-```typescript
-GET /api/admin/reports?status=pending&limit=20&offset=0
-Authorization: Bearer <token>
-
-Response:
-{
-  "reports": [
-    {
-      "id": "report_123",
-      "photo": {
-        "id": "photo_456",
-        "title": "Mountain Scene",
-        "filePath": "/uploads/comp_123/photo_456.jpg"
-      },
-      "reporter": {
-        "id": "user_789",
-        "email": "reporter@example.com"
-      },
-      "reason": "inappropriate",
-      "description": "Contains inappropriate content",
-      "status": "pending",
-      "reportedAt": "2024-01-15T10:00:00Z"
-    }
-  ],
-  "total": 3,
-  "limit": 20,
-  "offset": 0
-}
-```
-
-#### Resolve Report
-```typescript
-POST /api/admin/reports/:id/resolve
-Authorization: Bearer <token>
-
-Request:
-{
-  "action": "resolved", // or "dismissed"
-  "adminNotes": "Photo removed for inappropriate content",
-  "photoAction": "delete" // optional: "approve", "reject", "delete"
-}
-
-Response:
-{
-  "id": "report_123",
-  "status": "resolved",
-  "resolvedBy": "admin_789",
-  "resolvedAt": "2024-01-15T11:30:00Z"
-}
+  // Moderation statistics
+  getModerationStats: adminProcedure
+    .query(async () => {
+      return await moderationService.getModerationStats();
+    }),
+});
 ```
 
 ## Implementation
