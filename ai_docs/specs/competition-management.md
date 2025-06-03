@@ -46,165 +46,195 @@ interface Category {
 }
 ```
 
-## API Endpoints
+## tRPC Procedures
 
-### Competition Management
+### Competition Router
 
-#### Create Competition
+#### File: `api/trpc/routers/competition.ts`
+
 ```typescript
-POST /api/admin/competitions
-Authorization: Bearer <token>
-Content-Type: application/json
+import { z } from 'zod';
+import { createTRPCRouter, publicProcedure, adminProcedure } from '../trpc';
+import { CompetitionService } from '../../services/competition.service';
+import { 
+  competitionStatusSchema, 
+  paginationSchema, 
+  idSchema,
+  dateStringSchema 
+} from '../schemas/common';
+import { TRPCError } from '@trpc/server';
 
-Request:
-{
-  "title": "Wildlife Photography 2024",
-  "description": "Annual wildlife photography competition...",
-  "startDate": "2024-01-01T00:00:00Z",
-  "endDate": "2024-12-31T23:59:59Z",
-  "categories": [
-    {
-      "name": "Urban",
-      "maxPhotosPerUser": 5,
-      "description": "Urban wildlife photography"
-    },
-    {
-      "name": "Landscape",
-      "maxPhotosPerUser": 3,
-      "description": "Natural landscape photography"
-    }
-  ]
-}
+const createCompetitionSchema = z.object({
+  title: z.string().min(1).max(200),
+  description: z.string().min(1).max(2000),
+  startDate: dateStringSchema,
+  endDate: dateStringSchema,
+  categories: z.array(z.object({
+    name: z.string().min(1).max(100),
+    maxPhotosPerUser: z.number().min(1).max(20),
+    description: z.string().optional(),
+  })).optional(),
+});
 
-Response:
-{
-  "id": "comp_123",
-  "title": "Wildlife Photography 2024",
-  "status": "draft",
-  "categories": [
-    {
-      "id": "cat_1",
-      "name": "Urban",
-      "maxPhotosPerUser": 5
-    }
-  ]
-}
-```
+const updateCompetitionSchema = z.object({
+  id: idSchema,
+  title: z.string().min(1).max(200).optional(),
+  description: z.string().min(1).max(2000).optional(),
+  startDate: dateStringSchema.optional(),
+  endDate: dateStringSchema.optional(),
+});
 
-#### Update Competition
-```typescript
-PUT /api/admin/competitions/:id
-Authorization: Bearer <token>
+const listCompetitionsSchema = paginationSchema.extend({
+  status: competitionStatusSchema.optional(),
+});
 
-Request:
-{
-  "title": "Updated Competition Title",
-  "description": "Updated description",
-  "endDate": "2024-12-31T23:59:59Z"
-}
+const addCategorySchema = z.object({
+  competitionId: idSchema,
+  name: z.string().min(1).max(100),
+  maxPhotosPerUser: z.number().min(1).max(20),
+  description: z.string().optional(),
+});
 
-Response:
-{
-  "id": "comp_123",
-  "title": "Updated Competition Title",
-  "status": "draft",
-  "updatedAt": "2024-01-15T10:00:00Z"
-}
-```
+const updateCategorySchema = z.object({
+  id: idSchema,
+  maxPhotosPerUser: z.number().min(1).max(20).optional(),
+  description: z.string().optional(),
+});
 
-#### Activate Competition
-```typescript
-POST /api/admin/competitions/:id/activate
-Authorization: Bearer <token>
+const competitionService = new CompetitionService();
 
-Response:
-{
-  "id": "comp_123",
-  "status": "active",
-  "activatedAt": "2024-01-15T10:00:00Z"
-}
-```
+export const competitionRouter = createTRPCRouter({
+  // Public procedures
+  list: publicProcedure
+    .input(listCompetitionsSchema)
+    .query(async ({ input }) => {
+      return await competitionService.listCompetitions(input);
+    }),
 
-#### End Competition
-```typescript
-POST /api/admin/competitions/:id/end
-Authorization: Bearer <token>
+  getById: publicProcedure
+    .input(z.object({ id: idSchema }))
+    .query(async ({ input }) => {
+      const competition = await competitionService.getCompetitionById(input.id);
+      if (!competition) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Competition not found',
+        });
+      }
+      return competition;
+    }),
 
-Response:
-{
-  "id": "comp_123",
-  "status": "ended",
-  "endedAt": "2024-12-31T23:59:59Z"
-}
-```
+  getActive: publicProcedure
+    .query(async () => {
+      const competition = await competitionService.getActiveCompetition();
+      if (!competition) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'No active competition found',
+        });
+      }
+      return competition;
+    }),
 
-#### List Competitions
-```typescript
-GET /api/competitions?status=active&limit=10&offset=0
+  // Admin procedures
+  create: adminProcedure
+    .input(createCompetitionSchema)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await competitionService.createCompetition({
+          ...input,
+          createdBy: ctx.user.id,
+        });
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Response:
-{
-  "competitions": [
-    {
-      "id": "comp_123",
-      "title": "Wildlife Photography 2024",
-      "status": "active",
-      "startDate": "2024-01-01T00:00:00Z",
-      "endDate": "2024-12-31T23:59:59Z",
-      "categories": [...]
-    }
-  ],
-  "total": 1,
-  "limit": 10,
-  "offset": 0
-}
-```
+  update: adminProcedure
+    .input(updateCompetitionSchema)
+    .mutation(async ({ input }) => {
+      const { id, ...updates } = input;
+      try {
+        return await competitionService.updateCompetition(id, updates);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-### Category Management
+  activate: adminProcedure
+    .input(z.object({ id: idSchema }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await competitionService.activateCompetition(input.id, ctx.user.id);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-#### Add Category to Competition
-```typescript
-POST /api/admin/competitions/:competitionId/categories
-Authorization: Bearer <token>
+  end: adminProcedure
+    .input(z.object({ id: idSchema }))
+    .mutation(async ({ input }) => {
+      try {
+        return await competitionService.endCompetition(input.id);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Request:
-{
-  "name": "Wildlife Portraits",
-  "maxPhotosPerUser": 4,
-  "description": "Close-up wildlife photography"
-}
+  // Category management
+  addCategory: adminProcedure
+    .input(addCategorySchema)
+    .mutation(async ({ input }) => {
+      const { competitionId, ...categoryData } = input;
+      try {
+        return await competitionService.addCategory(competitionId, categoryData);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-Response:
-{
-  "id": "cat_3",
-  "name": "Wildlife Portraits",
-  "maxPhotosPerUser": 4,
-  "competitionId": "comp_123"
-}
-```
+  updateCategory: adminProcedure
+    .input(updateCategorySchema)
+    .mutation(async ({ input }) => {
+      const { id, ...updates } = input;
+      try {
+        return await competitionService.updateCategory(id, updates);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
 
-#### Update Category
-```typescript
-PUT /api/admin/categories/:id
-Authorization: Bearer <token>
-
-Request:
-{
-  "maxPhotosPerUser": 6,
-  "description": "Updated category description"
-}
-```
-
-#### Delete Category
-```typescript
-DELETE /api/admin/categories/:id
-Authorization: Bearer <token>
-
-Response:
-{
-  "success": true,
-  "message": "Category deleted successfully"
-}
+  deleteCategory: adminProcedure
+    .input(z.object({ id: idSchema }))
+    .mutation(async ({ input }) => {
+      try {
+        return await competitionService.deleteCategory(input.id);
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error.message,
+        });
+      }
+    }),
+});
 ```
 
 ## Implementation
@@ -478,143 +508,43 @@ export class CompetitionService {
 }
 ```
 
-### 2. Competition API Routes
+### 2. Client-Side Usage with tRPC
 
-#### File: `api/routes/competitions.ts`
+#### Custom Hooks for Competition Management
 
 ```typescript
-import { Hono } from 'hono';
-import { CompetitionService } from '../services/competition.service';
-import { authMiddleware, requireRole } from '../../workers/auth-middleware';
+// File: app/hooks/use-competitions.ts
+import { trpc } from '~/utils/trpc';
 
-const app = new Hono();
-const competitionService = new CompetitionService();
+export function useCompetitions() {
+  return {
+    // Public queries
+    useList: (params: { status?: 'draft' | 'active' | 'ended'; limit?: number; offset?: number }) =>
+      trpc.competition.list.useQuery(params),
+    
+    useById: (id: string) =>
+      trpc.competition.getById.useQuery({ id }, { enabled: !!id }),
+    
+    useActive: () =>
+      trpc.competition.getActive.useQuery(undefined, {
+        staleTime: 5 * 60 * 1000, // 5 minutes
+      }),
 
-// Public routes
-app.get('/competitions', async (c) => {
-  const status = c.req.query('status') as 'draft' | 'active' | 'ended' | undefined;
-  const limit = parseInt(c.req.query('limit') || '10');
-  const offset = parseInt(c.req.query('offset') || '0');
+    // Admin mutations
+    useCreate: () => trpc.competition.create.useMutation(),
+    useUpdate: () => trpc.competition.update.useMutation(),
+    useActivate: () => trpc.competition.activate.useMutation(),
+    useEnd: () => trpc.competition.end.useMutation(),
 
-  const result = await competitionService.listCompetitions({ status, limit, offset });
-  return c.json(result);
-});
-
-app.get('/competitions/:id', async (c) => {
-  const { id } = c.req.param();
-  const competition = await competitionService.getCompetitionById(id);
-  
-  if (!competition) {
-    return c.json({ error: 'Competition not found' }, 404);
-  }
-
-  return c.json(competition);
-});
-
-app.get('/competitions/active', async (c) => {
-  const competition = await competitionService.getActiveCompetition();
-  
-  if (!competition) {
-    return c.json({ error: 'No active competition' }, 404);
-  }
-
-  return c.json(competition);
-});
-
-// Admin routes
-app.use('/admin/*', authMiddleware, requireRole('admin'));
-
-app.post('/admin/competitions', async (c) => {
-  const user = c.get('user');
-  const data = await c.req.json();
-
-  try {
-    const competition = await competitionService.createCompetition({
-      ...data,
-      createdBy: user.id,
-    });
-
-    return c.json(competition, 201);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.put('/admin/competitions/:id', async (c) => {
-  const { id } = c.req.param();
-  const updates = await c.req.json();
-
-  try {
-    const competition = await competitionService.updateCompetition(id, updates);
-    return c.json(competition);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.post('/admin/competitions/:id/activate', async (c) => {
-  const { id } = c.req.param();
-  const user = c.get('user');
-
-  try {
-    const competition = await competitionService.activateCompetition(id, user.id);
-    return c.json(competition);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.post('/admin/competitions/:id/end', async (c) => {
-  const { id } = c.req.param();
-
-  try {
-    const competition = await competitionService.endCompetition(id);
-    return c.json(competition);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-// Category management
-app.post('/admin/competitions/:competitionId/categories', async (c) => {
-  const { competitionId } = c.req.param();
-  const categoryData = await c.req.json();
-
-  try {
-    const category = await competitionService.addCategory(competitionId, categoryData);
-    return c.json(category, 201);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.put('/admin/categories/:id', async (c) => {
-  const { id } = c.req.param();
-  const updates = await c.req.json();
-
-  try {
-    const category = await competitionService.updateCategory(id, updates);
-    return c.json(category);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-app.delete('/admin/categories/:id', async (c) => {
-  const { id } = c.req.param();
-
-  try {
-    const result = await competitionService.deleteCategory(id);
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: error.message }, 400);
-  }
-});
-
-export default app;
+    // Category management
+    useAddCategory: () => trpc.competition.addCategory.useMutation(),
+    useUpdateCategory: () => trpc.competition.updateCategory.useMutation(),
+    useDeleteCategory: () => trpc.competition.deleteCategory.useMutation(),
+  };
+}
 ```
 
-## Frontend Components
+## Frontend Components with tRPC
 
 ### 1. Competition Form Component
 
@@ -622,14 +552,14 @@ export default app;
 
 ```typescript
 import { useState } from 'react';
+import { useCompetitions } from '~/hooks/use-competitions';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
 import { Textarea } from '~/components/ui/textarea';
 
 interface CompetitionFormProps {
-  competition?: Competition;
-  onSubmit: (data: CompetitionFormData) => void;
-  loading?: boolean;
+  competition?: any; // Type from tRPC
+  onSuccess?: (competition: any) => void;
 }
 
 interface CompetitionFormData {
@@ -644,7 +574,13 @@ interface CompetitionFormData {
   }>;
 }
 
-export function CompetitionForm({ competition, onSubmit, loading }: CompetitionFormProps) {
+export function CompetitionForm({ competition, onSuccess }: CompetitionFormProps) {
+  const { useCreate, useUpdate } = useCompetitions();
+  const utils = trpc.useUtils();
+
+  const createMutation = useCreate();
+  const updateMutation = useUpdate();
+
   const [formData, setFormData] = useState<CompetitionFormData>({
     title: competition?.title || '',
     description: competition?.description || '',
@@ -656,9 +592,35 @@ export function CompetitionForm({ competition, onSubmit, loading }: CompetitionF
     ],
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const isLoading = createMutation.isLoading || updateMutation.isLoading;
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit(formData);
+    
+    try {
+      if (competition) {
+        const result = await updateMutation.mutateAsync({
+          id: competition.id,
+          ...formData,
+        });
+        
+        // Invalidate relevant queries
+        utils.competition.list.invalidate();
+        utils.competition.getById.invalidate({ id: competition.id });
+        
+        onSuccess?.(result);
+      } else {
+        const result = await createMutation.mutateAsync(formData);
+        
+        // Invalidate competition list
+        utils.competition.list.invalidate();
+        
+        onSuccess?.(result);
+      }
+    } catch (error) {
+      // Error is handled by tRPC and displayed via error state
+      console.error('Form submission error:', error);
+    }
   };
 
   const addCategory = () => {
@@ -684,8 +646,16 @@ export function CompetitionForm({ competition, onSubmit, loading }: CompetitionF
     }));
   };
 
+  const error = createMutation.error || updateMutation.error;
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
+          {error.message}
+        </div>
+      )}
+
       <div>
         <label htmlFor="title">Competition Title</label>
         <Input
@@ -770,10 +740,162 @@ export function CompetitionForm({ competition, onSubmit, loading }: CompetitionF
         ))}
       </div>
 
-      <Button type="submit" disabled={loading}>
-        {loading ? 'Saving...' : competition ? 'Update Competition' : 'Create Competition'}
+      <Button type="submit" disabled={isLoading}>
+        {isLoading ? 'Saving...' : competition ? 'Update Competition' : 'Create Competition'}
       </Button>
     </form>
+  );
+}
+```
+
+### 2. Competition List with Actions
+
+#### File: `app/components/admin/competition-list.tsx`
+
+```typescript
+import { useCompetitions } from '~/hooks/use-competitions';
+import { Button } from '~/components/ui/button';
+import { trpc } from '~/utils/trpc';
+
+export function CompetitionList() {
+  const { useList, useActivate, useEnd } = useCompetitions();
+  const utils = trpc.useUtils();
+
+  const { data: competitions, isLoading, refetch } = useList({
+    limit: 50,
+    offset: 0,
+  });
+
+  const activateMutation = useActivate();
+  const endMutation = useEnd();
+
+  const handleActivate = async (id: string) => {
+    if (confirm('Are you sure you want to activate this competition? This will deactivate any currently active competition.')) {
+      try {
+        await activateMutation.mutateAsync({ id });
+        
+        // Refresh all competition data
+        utils.competition.list.invalidate();
+        utils.competition.getActive.invalidate();
+        
+        refetch();
+      } catch (error) {
+        alert('Failed to activate competition: ' + error.message);
+      }
+    }
+  };
+
+  const handleEnd = async (id: string) => {
+    if (confirm('Are you sure you want to end this competition? This action cannot be undone.')) {
+      try {
+        await endMutation.mutateAsync({ id });
+        
+        // Refresh all competition data
+        utils.competition.list.invalidate();
+        utils.competition.getActive.invalidate();
+        
+        refetch();
+      } catch (error) {
+        alert('Failed to end competition: ' + error.message);
+      }
+    }
+  };
+
+  if (isLoading) return <div>Loading competitions...</div>;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">Competitions</h2>
+        <Button asChild>
+          <a href="/admin/competitions/new">Create Competition</a>
+        </Button>
+      </div>
+
+      <div className="border rounded-lg overflow-hidden">
+        <table className="w-full">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-2 text-left">Title</th>
+              <th className="px-4 py-2 text-left">Status</th>
+              <th className="px-4 py-2 text-left">Dates</th>
+              <th className="px-4 py-2 text-left">Categories</th>
+              <th className="px-4 py-2 text-left">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {competitions?.competitions.map((competition) => (
+              <tr key={competition.id} className="border-t">
+                <td className="px-4 py-2">
+                  <div>
+                    <div className="font-medium">{competition.title}</div>
+                    <div className="text-sm text-gray-500 truncate max-w-xs">
+                      {competition.description}
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-2">
+                  <span className={`px-2 py-1 rounded text-sm ${
+                    competition.status === 'active' ? 'bg-green-100 text-green-800' :
+                    competition.status === 'ended' ? 'bg-gray-100 text-gray-800' :
+                    'bg-yellow-100 text-yellow-800'
+                  }`}>
+                    {competition.status}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-sm">
+                  <div>{new Date(competition.startDate).toLocaleDateString()}</div>
+                  <div>{new Date(competition.endDate).toLocaleDateString()}</div>
+                </td>
+                <td className="px-4 py-2">
+                  {competition.categories?.length || 0} categories
+                </td>
+                <td className="px-4 py-2">
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      asChild
+                    >
+                      <a href={`/admin/competitions/${competition.id}/edit`}>
+                        Edit
+                      </a>
+                    </Button>
+                    
+                    {competition.status === 'draft' && (
+                      <Button
+                        size="sm"
+                        onClick={() => handleActivate(competition.id)}
+                        disabled={activateMutation.isLoading}
+                      >
+                        Activate
+                      </Button>
+                    )}
+                    
+                    {competition.status === 'active' && (
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => handleEnd(competition.id)}
+                        disabled={endMutation.isLoading}
+                      >
+                        End
+                      </Button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {competitions?.competitions.length === 0 && (
+        <div className="text-center text-gray-500 py-8">
+          No competitions found. Create your first competition to get started.
+        </div>
+      )}
+    </div>
   );
 }
 ```

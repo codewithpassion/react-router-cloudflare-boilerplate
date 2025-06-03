@@ -254,12 +254,13 @@ export const optionalAuth: MiddlewareHandler = async (c, next) => {
 };
 ```
 
-### 4. Client-Side Role Management
+### 4. Client-Side Role Management with tRPC
 
 #### File: `app/hooks/use-auth.ts`
 
 ```typescript
 import { createContext, useContext, type ReactNode } from 'react';
+import { trpc } from '~/utils/trpc';
 import type { User } from '@portcityai/better-auth';
 
 interface AuthContextType {
@@ -270,14 +271,21 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   loading: boolean;
+  refetch: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // Implementation with better-auth client
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Use tRPC to get current user
+  const { 
+    data: user, 
+    isLoading: loading, 
+    refetch 
+  } = trpc.auth.me.useQuery(undefined, {
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
 
   const hasRole = (requiredRole: 'user' | 'admin' | 'superadmin') => {
     if (!user?.role) return false;
@@ -297,17 +305,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const value = {
-    user,
+    user: user || null,
     isAuthenticated: !!user,
     hasRole,
     canAssignRole,
     login: async (email: string, password: string) => {
       // Better-auth login implementation
+      // After login, refetch user data
+      refetch();
     },
     logout: async () => {
       // Better-auth logout implementation
+      // After logout, refetch will return null
+      refetch();
     },
     loading,
+    refetch,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -320,9 +333,25 @@ export function useAuth() {
   }
   return context;
 }
+
+// Custom hooks for role management
+export function useUserManagement() {
+  return {
+    // Get users list
+    useUsers: (params: Parameters<typeof trpc.auth.getUsers.useQuery>[0]) =>
+      trpc.auth.getUsers.useQuery(params),
+    
+    // Update user role
+    useUpdateRole: () => trpc.auth.updateUserRole.useMutation(),
+    
+    // Get users by role
+    useUsersByRole: (role: 'user' | 'admin' | 'superadmin') =>
+      trpc.auth.getUsersByRole.useQuery({ role }),
+  };
+}
 ```
 
-### 5. Protected Route Components
+### 5. Frontend Components with tRPC
 
 #### File: `app/components/protected-route.tsx`
 
@@ -376,31 +405,210 @@ export function SuperAdminRoute({ children }: { children: React.ReactNode }) {
 }
 ```
 
-## API Endpoints
-
-### Role Management APIs
+#### File: `app/components/admin/user-management.tsx`
 
 ```typescript
-// POST /api/admin/users/:userId/role
-// Body: { role: 'user' | 'admin' | 'superadmin' }
-app.post('/api/admin/users/:userId/role', authMiddleware, requireRole('admin'), async (c) => {
-  const { userId } = c.req.param();
-  const { role } = await c.req.json();
-  const adminUser = c.get('user');
+import { useState } from 'react';
+import { trpc } from '~/utils/trpc';
+import { useUserManagement } from '~/hooks/use-auth';
+import { Button } from '~/components/ui/button';
+import { Input } from '~/components/ui/input';
 
-  const result = await RoleManager.updateUserRole(adminUser.id, userId, role);
+export function UserManagement() {
+  const [search, setSearch] = useState('');
+  const [selectedRole, setSelectedRole] = useState<'all' | 'user' | 'admin' | 'superadmin'>('all');
   
-  if (!result.success) {
-    return c.json({ error: result.error }, 400);
-  }
+  const { useUsers, useUpdateRole } = useUserManagement();
+  
+  const { 
+    data: usersData, 
+    isLoading, 
+    refetch 
+  } = useUsers({
+    search: search || undefined,
+    role: selectedRole === 'all' ? undefined : selectedRole,
+    limit: 50,
+    offset: 0,
+  });
 
-  return c.json({ success: true });
+  const updateRoleMutation = useUpdateRole();
+
+  const handleRoleUpdate = async (userId: string, newRole: 'user' | 'admin' | 'superadmin') => {
+    try {
+      await updateRoleMutation.mutateAsync({ userId, role: newRole });
+      refetch();
+    } catch (error) {
+      alert('Failed to update role: ' + error.message);
+    }
+  };
+
+  if (isLoading) return <div>Loading users...</div>;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-4">
+        <Input
+          placeholder="Search users..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <select
+          value={selectedRole}
+          onChange={(e) => setSelectedRole(e.target.value as any)}
+          className="border rounded px-3 py-2"
+        >
+          <option value="all">All Roles</option>
+          <option value="user">Users</option>
+          <option value="admin">Admins</option>
+          <option value="superadmin">Super Admins</option>
+        </select>
+      </div>
+
+      <div className="border rounded-lg overflow-hidden">
+        <table className="w-full">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-2 text-left">Email</th>
+              <th className="px-4 py-2 text-left">Role</th>
+              <th className="px-4 py-2 text-left">Photos</th>
+              <th className="px-4 py-2 text-left">Votes Cast</th>
+              <th className="px-4 py-2 text-left">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {usersData?.users.map((user) => (
+              <tr key={user.id} className="border-t">
+                <td className="px-4 py-2">{user.email}</td>
+                <td className="px-4 py-2">
+                  <span className={`px-2 py-1 rounded text-sm ${
+                    user.role === 'superadmin' ? 'bg-red-100 text-red-800' :
+                    user.role === 'admin' ? 'bg-blue-100 text-blue-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}>
+                    {user.role}
+                  </span>
+                </td>
+                <td className="px-4 py-2">{user.stats?.photosSubmitted || 0}</td>
+                <td className="px-4 py-2">{user.stats?.votesCast || 0}</td>
+                <td className="px-4 py-2">
+                  <div className="flex gap-2">
+                    {user.role !== 'admin' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRoleUpdate(user.id, 'admin')}
+                        disabled={updateRoleMutation.isLoading}
+                      >
+                        Make Admin
+                      </Button>
+                    )}
+                    {user.role !== 'user' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRoleUpdate(user.id, 'user')}
+                        disabled={updateRoleMutation.isLoading}
+                      >
+                        Make User
+                      </Button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {usersData?.users.length === 0 && (
+        <div className="text-center text-gray-500 py-4">
+          No users found
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+## tRPC Procedures
+
+### Auth Router with Role Management
+
+#### File: `api/trpc/routers/auth.ts`
+
+```typescript
+import { z } from 'zod';
+import { createTRPCRouter, publicProcedure, protectedProcedure, superAdminProcedure } from '../trpc';
+import { RoleManager } from '@portcityai/better-auth/role-management';
+import { userRoleSchema, paginationSchema } from '../schemas/common';
+import { TRPCError } from '@trpc/server';
+
+const updateRoleInputSchema = z.object({
+  userId: z.string(),
+  role: userRoleSchema,
 });
 
-// GET /api/admin/users
-app.get('/api/admin/users', authMiddleware, requireRole('admin'), async (c) => {
-  const users = await RoleManager.getUsersByRole('user');
-  return c.json(users);
+const getUsersInputSchema = paginationSchema.extend({
+  role: userRoleSchema.optional(),
+  search: z.string().optional(),
+});
+
+export const authRouter = createTRPCRouter({
+  // Get current user session
+  me: protectedProcedure
+    .query(({ ctx }) => {
+      return ctx.user;
+    }),
+
+  // Update user role (SuperAdmin only)
+  updateUserRole: superAdminProcedure
+    .input(updateRoleInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const result = await RoleManager.updateUserRole(
+        ctx.user.id,
+        input.userId,
+        input.role
+      );
+
+      if (!result.success) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: result.error || 'Failed to update user role',
+        });
+      }
+
+      return { success: true };
+    }),
+
+  // Get users list (Admin+)
+  getUsers: protectedProcedure
+    .input(getUsersInputSchema)
+    .query(async ({ ctx, input }) => {
+      // Check if user has admin role
+      if (!RoleManager.hasRole(ctx.user.role as any, 'admin')) {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+
+      const { role, search, limit, offset } = input;
+      
+      return await RoleManager.getUserList({
+        role: role || 'all',
+        search,
+        limit,
+        offset,
+      });
+    }),
+
+  // Get users by role (Admin+)
+  getUsersByRole: protectedProcedure
+    .input(z.object({ role: userRoleSchema }))
+    .query(async ({ ctx, input }) => {
+      if (!RoleManager.hasRole(ctx.user.role as any, 'admin')) {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+
+      return await RoleManager.getUsersByRole(input.role);
+    }),
 });
 ```
 

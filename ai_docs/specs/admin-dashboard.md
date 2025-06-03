@@ -65,149 +65,45 @@ interface DashboardMetrics {
 }
 ```
 
-## API Endpoints
+## tRPC Procedures
 
-### Dashboard Analytics
+### Dashboard Router
+
+#### File: `api/trpc/routers/dashboard.ts`
+
 ```typescript
-GET /api/admin/dashboard/overview
-Authorization: Bearer <token>
+import { z } from 'zod';
+import { createTRPCRouter, adminProcedure } from '../trpc';
+import { DashboardService } from '../../services/dashboard.service';
+import { idSchema } from '../schemas/common';
 
-Response:
-{
-  "activeCompetition": {
-    "id": "comp_123",
-    "title": "Wildlife Photography 2024",
-    "totalPhotos": 250,
-    "totalVotes": 1500,
-    "daysRemaining": 45,
-    "endDate": "2024-12-31T23:59:59Z"
-  },
-  "pending": {
-    "photos": 15,
-    "reports": 3
-  },
-  "today": {
-    "newPhotos": 12,
-    "newReports": 1,
-    "newUsers": 5,
-    "totalVotes": 89
-  },
-  "users": {
-    "total": 1250,
-    "admins": 5,
-    "activeToday": 120
-  }
-}
+const dashboardService = new DashboardService();
+
+export const dashboardRouter = createTRPCRouter({
+  // Dashboard overview metrics
+  getOverview: adminProcedure
+    .query(async () => {
+      return await dashboardService.getOverviewMetrics();
+    }),
+
+  // Competition analytics
+  getCompetitionAnalytics: adminProcedure
+    .input(z.object({ competitionId: idSchema }))
+    .query(async ({ input }) => {
+      return await dashboardService.getCompetitionAnalytics(input.competitionId);
+    }),
+
+  // System statistics
+  getSystemStats: adminProcedure
+    .query(async () => {
+      return await dashboardService.getSystemStats();
+    }),
+});
 ```
 
-### Competition Analytics
-```typescript
-GET /api/admin/competitions/:id/analytics
-Authorization: Bearer <token>
+### Integration with Auth Router
 
-Response:
-{
-  "competition": {
-    "id": "comp_123",
-    "title": "Wildlife Photography 2024",
-    "status": "active",
-    "startDate": "2024-01-01T00:00:00Z",
-    "endDate": "2024-12-31T23:59:59Z"
-  },
-  "photos": {
-    "total": 250,
-    "approved": 200,
-    "pending": 15,
-    "rejected": 35,
-    "byCategory": [
-      {
-        "categoryId": "cat_1",
-        "categoryName": "Urban",
-        "count": 120,
-        "votes": 850
-      },
-      {
-        "categoryId": "cat_2", 
-        "categoryName": "Landscape",
-        "count": 130,
-        "votes": 950
-      }
-    ]
-  },
-  "votes": {
-    "total": 1800,
-    "today": 89,
-    "avgPerPhoto": 7.2
-  },
-  "submissions": {
-    "dailySubmissions": [
-      { "date": "2024-01-15", "count": 12 },
-      { "date": "2024-01-14", "count": 8 }
-    ],
-    "topPhotographers": [
-      {
-        "userId": "user_123",
-        "email": "photographer@example.com",
-        "photoCount": 8,
-        "totalVotes": 45
-      }
-    ]
-  }
-}
-```
-
-### User Management (SuperAdmin Only)
-```typescript
-GET /api/admin/users?role=all&limit=50&offset=0&search=john
-Authorization: Bearer <token>
-
-Response:
-{
-  "users": [
-    {
-      "id": "user_123",
-      "email": "john@example.com",
-      "role": "user",
-      "createdAt": "2024-01-01T00:00:00Z",
-      "lastActive": "2024-01-15T10:30:00Z",
-      "stats": {
-        "photosSubmitted": 5,
-        "votesReceived": 25,
-        "votesCast": 100
-      }
-    }
-  ],
-  "total": 1250,
-  "limit": 50,
-  "offset": 0
-}
-```
-
-### System Statistics
-```typescript
-GET /api/admin/system/stats
-Authorization: Bearer <token>
-
-Response:
-{
-  "storage": {
-    "totalFiles": 2500,
-    "totalSizeGB": 15.7,
-    "avgFileSizeMB": 6.3
-  },
-  "database": {
-    "totalPhotos": 2450,
-    "totalVotes": 18500,
-    "totalReports": 25,
-    "totalUsers": 1250
-  },
-  "performance": {
-    "avgResponseTimeMs": 245,
-    "errorRate": 0.02,
-    "uptime": 99.8
-  }
-}
-```
+The user management functionality is already covered in the auth router (see authentication-roles.md).
 
 ## Implementation
 
@@ -584,150 +480,79 @@ export class DashboardService {
 }
 ```
 
-### 2. Dashboard API Routes
+### 2. Client-Side Usage with tRPC
 
-#### File: `api/routes/dashboard.ts`
+#### Custom Hooks for Dashboard
 
 ```typescript
-import { Hono } from 'hono';
-import { DashboardService } from '../services/dashboard.service';
-import { authMiddleware, requireRole } from '../../workers/auth-middleware';
+// File: app/hooks/use-dashboard.ts
+import { trpc } from '~/utils/trpc';
 
-const app = new Hono();
-const dashboardService = new DashboardService();
+export function useDashboard() {
+  return {
+    // Dashboard overview with auto-refresh
+    useOverview: () =>
+      trpc.dashboard.getOverview.useQuery(undefined, {
+        refetchInterval: 5 * 60 * 1000, // Refresh every 5 minutes
+        staleTime: 2 * 60 * 1000, // Consider stale after 2 minutes
+      }),
 
-// All dashboard routes require admin access
-app.use('/*', authMiddleware, requireRole('admin'));
+    // Competition analytics
+    useCompetitionAnalytics: (competitionId: string) =>
+      trpc.dashboard.getCompetitionAnalytics.useQuery(
+        { competitionId },
+        { enabled: !!competitionId }
+      ),
 
-app.get('/overview', async (c) => {
-  try {
-    const metrics = await dashboardService.getOverviewMetrics();
-    return c.json(metrics);
-  } catch (error) {
-    return c.json({ error: 'Failed to get dashboard overview' }, 500);
-  }
-});
-
-app.get('/competitions/:id/analytics', async (c) => {
-  const { id } = c.req.param();
-
-  try {
-    const analytics = await dashboardService.getCompetitionAnalytics(id);
-    return c.json(analytics);
-  } catch (error) {
-    return c.json({ error: 'Failed to get competition analytics' }, 500);
-  }
-});
-
-app.get('/system/stats', async (c) => {
-  try {
-    const stats = await dashboardService.getSystemStats();
-    return c.json(stats);
-  } catch (error) {
-    return c.json({ error: 'Failed to get system stats' }, 500);
-  }
-});
-
-// SuperAdmin only routes
-app.use('/users', requireRole('superadmin'));
-
-app.get('/users', async (c) => {
-  const role = c.req.query('role') as any;
-  const search = c.req.query('search');
-  const limit = parseInt(c.req.query('limit') || '50');
-  const offset = parseInt(c.req.query('offset') || '0');
-
-  try {
-    const result = await dashboardService.getUserList({
-      role,
-      search,
-      limit,
-      offset,
-    });
-
-    return c.json(result);
-  } catch (error) {
-    return c.json({ error: 'Failed to get user list' }, 500);
-  }
-});
-
-export default app;
+    // System statistics
+    useSystemStats: () =>
+      trpc.dashboard.getSystemStats.useQuery(undefined, {
+        staleTime: 10 * 60 * 1000, // System stats change less frequently
+      }),
+  };
+}
 ```
 
-### 3. Frontend Dashboard Component
+### 3. Frontend Dashboard Component with tRPC
 
 #### File: `app/components/admin/dashboard.tsx`
 
 ```typescript
-import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card';
 import { Button } from '~/components/ui/button';
 import { useAuth } from '~/hooks/use-auth';
-
-interface DashboardMetrics {
-  activeCompetition: {
-    id: string;
-    title: string;
-    totalPhotos: number;
-    totalVotes: number;
-    daysRemaining: number;
-  } | null;
-  pending: {
-    photos: number;
-    reports: number;
-  };
-  today: {
-    newPhotos: number;
-    newReports: number;
-    newUsers: number;
-    totalVotes: number;
-  };
-  users: {
-    total: number;
-    admins: number;
-    activeToday: number;
-  };
-}
+import { useDashboard } from '~/hooks/use-dashboard';
 
 export function AdminDashboard() {
   const { hasRole } = useAuth();
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    loadDashboardData();
-  }, []);
-
-  const loadDashboardData = async () => {
-    try {
-      const response = await fetch('/api/admin/dashboard/overview', {
-        credentials: 'include',
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setMetrics(data);
-      }
-    } catch (error) {
-      console.error('Failed to load dashboard data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { useOverview } = useDashboard();
+  
+  const { 
+    data: metrics, 
+    isLoading: loading, 
+    error,
+    refetch 
+  } = useOverview();
 
   if (loading) {
     return <div>Loading dashboard...</div>;
   }
 
+  if (error) {
+    return <div>Failed to load dashboard data: {error.message}</div>;
+  }
+
   if (!metrics) {
-    return <div>Failed to load dashboard data</div>;
+    return <div>No dashboard data available</div>;
   }
 
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-        <Button onClick={loadDashboardData}>Refresh</Button>
+        <Button onClick={() => refetch()} disabled={loading}>
+          {loading ? 'Refreshing...' : 'Refresh'}
+        </Button>
       </div>
 
       {/* Active Competition Overview */}
@@ -871,6 +696,156 @@ export function AdminDashboard() {
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+}
+```
+
+### 4. Competition Analytics Component
+
+#### File: `app/components/admin/competition-analytics.tsx`
+
+```typescript
+import { useDashboard } from '~/hooks/use-dashboard';
+import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card';
+
+interface CompetitionAnalyticsProps {
+  competitionId: string;
+}
+
+export function CompetitionAnalytics({ competitionId }: CompetitionAnalyticsProps) {
+  const { useCompetitionAnalytics } = useDashboard();
+  
+  const { 
+    data: analytics, 
+    isLoading,
+    error 
+  } = useCompetitionAnalytics(competitionId);
+
+  if (isLoading) return <div>Loading analytics...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+  if (!analytics) return <div>No analytics available</div>;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">Competition Analytics</h2>
+        <div className="text-sm text-gray-600">
+          {analytics.competition.title} - {analytics.competition.status}
+        </div>
+      </div>
+
+      {/* Photo Statistics */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Total Photos</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{analytics.photos.total}</div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Approved</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-600">
+              {analytics.photos.approved}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Pending</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-yellow-600">
+              {analytics.photos.pending}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Rejected</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-red-600">
+              {analytics.photos.rejected}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Category Breakdown */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Photos by Category</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            {analytics.photos.byCategory.map((category) => (
+              <div key={category.categoryId} className="flex justify-between items-center">
+                <div>
+                  <div className="font-medium">{category.categoryName}</div>
+                  <div className="text-sm text-gray-600">
+                    {category.count} photos, {category.votes} votes
+                  </div>
+                </div>
+                <div className="text-lg font-semibold">
+                  {category.count > 0 ? Math.round(category.votes / category.count) : 0} avg votes
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Top Photographers */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Top Photographers</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-2">
+            {analytics.submissions.topPhotographers.map((photographer, index) => (
+              <div key={photographer.userId} className="flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">#{index + 1}</span>
+                  <span>{photographer.email}</span>
+                </div>
+                <div className="text-sm text-gray-600">
+                  {photographer.photoCount} photos, {photographer.totalVotes} votes
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Daily Submissions Chart would go here */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Daily Submissions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-sm text-gray-600">
+            Chart visualization would be implemented here using a charting library
+          </div>
+          {/* Simple list for now */}
+          <div className="mt-4 space-y-1">
+            {analytics.submissions.dailySubmissions.slice(-7).map((day) => (
+              <div key={day.date} className="flex justify-between">
+                <span>{new Date(day.date).toLocaleDateString()}</span>
+                <span>{day.count} photos</span>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
