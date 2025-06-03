@@ -1,0 +1,28 @@
+{
+	"name": "@portcityai/better-auth",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy --minify",
+		"cf-typegen": "wrangler types --env-interface CloudflareBindings",
+		"ba-generate": "bunx @better-auth/cli@latest generate --output src/db/auth-schema.ts -y",
+		"db:apply": "wrangler d1 migrations apply better-auth-test-db",
+		"db:gen": "drizzle-kit generate",
+		"db:update": "drizzle-kit generate && wrangler d1 migrations apply better-auth-test-db --local"
+	},
+	"dependencies": {
+		"better-auth": "^1.2.5",
+		"drizzle-kit": "^0.30.6",
+		"drizzle-orm": "^0.41.0",
+		"hono": "^4.7.5",
+		"kysely": "^0.27.6",
+		"kysely-d1": "^0.3.0",
+		"resend": "^4.2.0",
+		"sonner": "^2.0.3"
+	},
+	"devDependencies": {
+		"@opennextjs/cloudflare": "^1.0.0-beta.2",
+		"@types/better-sqlite3": "^7.6.13",
+		"better-sqlite3": "^11.9.1",
+		"wrangler": "^4.10.0"
+	}
+}
